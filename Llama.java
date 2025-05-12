@@ -1,4 +1,4 @@
-
+// Original: https://gist.github.com/kishida/05656bfcbe840f269784f7dbbee5928e
 // based on https://github.com/karpathy/llama2.c/commit/411c5bd2db9a87e94e1bd1a6c7b7ca117adc4b01
 // at Sep 14, 2023
 
