@@ -1,0 +1,22 @@
+{
+  "configurations": [
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:llama2.c}/llama-swift",
+      "name": "Debug llama-swift (llama-swift)",
+      "program": "${workspaceFolder:llama2.c}/llama-swift/.build/debug/llama-swift",
+      "preLaunchTask": "swift: Build Debug llama-swift (llama-swift)"
+    },
+    {
+      "type": "swift",
+      "request": "launch",
+      "args": [],
+      "cwd": "${workspaceFolder:llama2.c}/llama-swift",
+      "name": "Release llama-swift (llama-swift)",
+      "program": "${workspaceFolder:llama2.c}/llama-swift/.build/release/llama-swift",
+      "preLaunchTask": "swift: Build Release llama-swift (llama-swift)"
+    }
+  ]
+}
