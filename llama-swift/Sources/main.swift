@@ -1,6 +1,25 @@
 import Foundation
 
 public enum Llama {
+  enum LlamaError: Error {
+    case insufficientData
+  }
+
+  static func loadValue<T: FixedWidthInteger>(
+    from data: Data, offset: inout Int
+  ) throws -> T {
+    let byteSize = MemoryLayout<T>.stride
+    let range = offset..<(offset + byteSize)
+    guard range.upperBound <= data.count else {
+      throw LlamaError.insufficientData
+    }
+    let value = data.withUnsafeBytes { rawBufferPointer in
+      rawBufferPointer.loadUnaligned(fromByteOffset: offset, as: T.self)
+    }.littleEndian
+    offset += byteSize
+    return value
+  }
+
   struct Config {
     /// transformer dimension
     let dimension: Int
@@ -13,9 +32,22 @@ public enum Llama {
     /// number of key/value heads
     let keyValueHeadCount: Int
     /// vocabulary size
+    let rawVocabularySize: Int
+    /// vocabulary size(absolute)
     let vocabularySize: Int
     /// max ksequence length
     let sequenceLength: Int
+
+    init(from data: Data, offset: inout Int) throws {
+      self.dimension = Int(try loadValue(from: data, offset: &offset) as Int32)
+      self.hiddenDimension = Int(try loadValue(from: data, offset: &offset) as Int32)
+      self.layerCount = Int(try loadValue(from: data, offset: &offset) as Int32)
+      self.headCount = Int(try loadValue(from: data, offset: &offset) as Int32)
+      self.keyValueHeadCount = Int(try loadValue(from: data, offset: &offset) as Int32)
+      self.rawVocabularySize = Int(try loadValue(from: data, offset: &offset) as Int32)
+      self.vocabularySize = abs(rawVocabularySize)
+      self.sequenceLength = Int(try loadValue(from: data, offset: &offset) as Int32)
+    }
 
     public func toString() -> String {
       return """
@@ -59,10 +91,9 @@ public enum Llama {
     /// classifier weights(output logits)
     let outputClassifierWeights: FloatBufferView
 
-    init(config: Config, modelData: Data, sharedWeights: Bool) throws {
+    init(config: Config, modelData: Data, sharedWeights: Bool, currentOffset: inout Int) throws {
       self.config = config
       self.modelData = modelData
-      var currentOffset = 0
       let floatStride = MemoryLayout<Float>.stride
 
       let headSize = config.dimension / config.headCount
@@ -161,6 +192,77 @@ public enum Llama {
         print("Warning: \(currentOffset) does not match modelData size \(modelData.count)")
       }
       print("Successfully loaded weights. Final offset: \(currentOffset)")
+    }
+  }
+
+  struct RunState {
+    let activationBuffer: [Float]
+    let activationBuffer2: [Float]
+    let ffnHiddenBuffer: [Float]
+    let ffnHiddenBuffer2: [Float]
+    let query: [Float]
+    let attributionScores: [[Float]]
+    let logits: [Float]
+    let keyCashe: [[[Float]]]
+    let valueCashe: [[[Float]]]
+
+    init(config: Config) {
+      let keyValueDimension = (config.dimension * config.keyValueHeadCount) / config.headCount
+      func makeFloatArray(_ dim1: Int, _ dim2: Int) -> [[Float]] {
+        return [[Float]](repeating: [Float](repeating: 0, count: dim2), count: dim1)
+      }
+      func makeFloatArray(_ dim1: Int, _ dim2: Int, _ dim3: Int) -> [[[Float]]] {
+        return [[[Float]]](
+          repeating: makeFloatArray(dim1, dim2),
+          count: dim3)
+      }
+
+      self.activationBuffer = [Float](repeating: 0, count: config.dimension)
+      self.activationBuffer2 = [Float](repeating: 0, count: config.dimension)
+      self.ffnHiddenBuffer = [Float](repeating: 0, count: config.hiddenDimension)
+      self.ffnHiddenBuffer2 = [Float](repeating: 0, count: config.hiddenDimension)
+      self.query = [Float](repeating: 0, count: config.dimension)
+      self.keyCashe = makeFloatArray(config.layerCount, config.sequenceLength, keyValueDimension)
+      self.valueCashe = makeFloatArray(config.layerCount, config.sequenceLength, keyValueDimension)
+      self.attributionScores = makeFloatArray(config.sequenceLength, config.headCount)
+      self.logits = [Float](repeating: 0, count: config.vocabularySize)
+    }
+  }
+
+  struct Transformer {
+    let config: Config
+    let weights: TransformerWeights
+    var runState: RunState
+
+    private let modelWeightsData: Data
+
+    init(checkpointURL: URL) throws {
+      self.modelWeightsData = try Data(contentsOf: checkpointURL, options: .mappedIfSafe)
+      var currentOffset = 0
+      self.config = try Config(from: modelWeightsData, offset: &currentOffset)
+      self.weights = try TransformerWeights(
+        config: config,
+        modelData: modelWeightsData,
+        sharedWeights: config.rawVocabularySize > 0,
+        currentOffset: &currentOffset
+      )
+      self.runState = RunState(config: config)
+    }
+  }
+
+  static func rmsnorm(
+    out: inout [Float], activation: [Float], weight: FloatBufferView, size: Int
+  ) {
+    var sumOfSquares: Float = 0
+    for i in 0..<size {
+      let value = activation[i]
+      sumOfSquares += value * value
+    }
+    sumOfSquares = sumOfSquares / Float(size)
+    sumOfSquares = sumOfSquares + 1e-5
+    sumOfSquares = 1 / sqrt(sumOfSquares)
+    for i in 0..<size {
+      out[i] = weight[i] * (sumOfSquares * activation[i])
     }
   }
 }
