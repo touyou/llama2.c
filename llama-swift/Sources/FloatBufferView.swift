@@ -61,4 +61,17 @@ public struct FloatBufferView: RandomAccessCollection {
       return try body(bufferPointer)
     }
   }
+
+  /// sliceを取得する
+  public func slice(from offset: Int, size: Int) -> FloatBufferView {
+    let floatStride = MemoryLayout<Float>.stride
+    let start = baseOffset + offset * floatStride
+    let range = start..<baseOffset + size * floatStride
+    return FloatBufferView(data: data, range: range)
+  }
+
+  /// Arrayに変換する
+  public func toArray() -> [Float] {
+    Array(self)
+  }
 }

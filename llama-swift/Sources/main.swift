@@ -196,15 +196,17 @@ public enum Llama {
   }
 
   struct RunState {
-    let activationBuffer: [Float]
-    let activationBuffer2: [Float]
-    let ffnHiddenBuffer: [Float]
-    let ffnHiddenBuffer2: [Float]
-    let query: [Float]
-    let attributionScores: [[Float]]
-    let logits: [Float]
-    let keyCache: [[[Float]]]
-    let valueCache: [[[Float]]]
+    var activationBuffer: [Float]
+    var activationBuffer2: [Float]
+    var ffnHiddenBuffer: [Float]
+    var ffnHiddenBuffer2: [Float]
+    var query: [Float]
+    var key: [Float]
+    var value: [Float]
+    var attributionScores: [[Float]]
+    var logits: [Float]
+    var keyCache: [[[Float]]]
+    var valueCache: [[[Float]]]
 
     init(config: Config) {
       let keyValueDimension = (config.dimension * config.keyValueHeadCount) / config.headCount
@@ -224,6 +226,8 @@ public enum Llama {
       self.ffnHiddenBuffer = [Float](repeating: 0, count: config.hiddenDimension)
       self.ffnHiddenBuffer2 = [Float](repeating: 0, count: config.hiddenDimension)
       self.query = [Float](repeating: 0, count: config.dimension)
+      self.key = [Float](repeating: 0, count: keyValueDimension)
+      self.value = [Float](repeating: 0, count: keyValueDimension)
       // float[layerCount][sequenceLength][keyValueDimension]
       self.keyCache = makeFloatArray(config.layerCount, config.sequenceLength, keyValueDimension)
       self.valueCache = makeFloatArray(config.layerCount, config.sequenceLength, keyValueDimension)
@@ -251,6 +255,65 @@ public enum Llama {
         currentOffset: &currentOffset
       )
       self.runState = RunState(config: config)
+    }
+
+    mutating func forward(token: Int, position: Int) {
+      let dimension = config.dimension
+      let keyValueDimension = (config.dimension * config.keyValueHeadCount) / config.headCount
+      let keyValueMultiplier = config.headCount / config.keyValueHeadCount
+      let hiddenDimension = config.hiddenDimension
+      let headSize = dimension / config.headCount
+      var headAsqrt: Float = sqrt(Float(headSize))
+      let activation = weights.tokenEmbeddingTable.slice(from: token, size: dimension)
+      var currentActivation: [Float] = activation.toArray()
+
+      // forward all the layers
+      for layer in 0..<config.layerCount {
+        // attention rmsnorm
+        rmsnorm(
+          out: &runState.activationBuffer, activation: currentActivation,
+          weight: weights.attentionRMSNormWeights[layer], size: dimension)
+
+        // key and value point to the kv cache
+        runState.key = runState.keyCache[layer][position]
+        runState.value = runState.valueCache[layer][position]
+
+        // query key value matmuls for this position
+        matmul(
+          activationOut: &runState.query, activation: runState.activationBuffer,
+          weight: weights.attentionQueryWeights[layer], n: dimension, d: dimension)
+        matmul(
+          activationOut: &runState.key, activation: runState.activationBuffer,
+          weight: weights.attentionKeyWeights[layer], n: keyValueDimension, d: dimension)
+        matmul(
+          activationOut: &runState.value, activation: runState.activationBuffer,
+          weight: weights.attentionValueWeights[layer], n: keyValueDimension, d: dimension)
+
+        // RoPE relative positional encoding: complex-valued rotate query and key in each head
+        for i in stride(from: 0, to: dimension, by: 2) {
+          let headDimension = i % headSize
+          let frequency = 1.0 / pow(10000.0, Float(headDimension) / Float(headSize))
+          let value = Float(position) * frequency
+          let rotationCosine = cos(value)
+          let rotationSine = sin(value)
+          let rotationTargetCount = i < keyValueDimension ? 2 : 1
+          for v in 0..<rotationTargetCount {
+            let targetVector = v == 0 ? runState.query : runState.key
+            let v0 = targetVector[i]
+            let v1 = targetVector[i + 1]
+            let res0 = v0 * rotationCosine - v1 * rotationSine
+            let res1 = v0 * rotationSine + v1 * rotationCosine
+            if v == 0 {
+              runState.query[i] = res0
+              runState.query[i + 1] = res1
+            } else {
+              runState.key[i] = res0
+              runState.key[i + 1] = res1
+            }
+          }
+        }
+
+      }
     }
   }
 
@@ -288,8 +351,8 @@ public enum Llama {
     activationOut: inout [Float],
     activation: [Float],
     weight: FloatBufferView,
+    n: Int,  // 列数
     d: Int,  // 行数
-    n: Int  // 列数
   ) {
     precondition(activationOut.count == d, "activationOut count must be \(d)")
     precondition(activation.count == n, "activation count must be \(n)")
